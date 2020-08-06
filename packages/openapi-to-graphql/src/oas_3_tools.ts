@@ -23,6 +23,8 @@ import {
   ReferenceObject,
   LinksObject,
   LinkObject,
+  CallbacksObject,
+  CallbackObject,
   MediaTypesObject,
   SecuritySchemeObject,
   SecurityRequirementObject
@@ -37,7 +39,8 @@ import { InternalOptions } from './types/options'
 import * as Swagger2OpenAPI from 'swagger2openapi'
 import * as OASValidator from 'oas-validator'
 import debug from 'debug'
-import { handleWarning } from './utils'
+import { handleWarning, MitigationTypes } from './utils'
+import * as jsonptr from 'json-ptr'
 import * as pluralize from 'pluralize'
 
 // Type definitions & exports:
@@ -74,52 +77,94 @@ const preprocessingLog = debug('preprocessing')
 const translationLog = debug('translation')
 
 // OAS constants
-export const OAS_OPERATIONS = [
-  'get',
-  'put',
-  'post',
-  'patch',
-  'delete',
-  'options',
-  'head'
-]
+export enum HTTP_METHODS {
+  'get' = 'get',
+  'put' = 'put',
+  'post' = 'post',
+  'patch' = 'patch',
+  'delete' = 'delete',
+  'options' = 'options',
+  'head' = 'head'
+}
+
 export const SUCCESS_STATUS_RX = /2[0-9]{2}|2XX/
+
+/**
+ * Given an HTTP method, convert it to the HTTP_METHODS enum
+ */
+export function methodToHttpMethod(method: string): HTTP_METHODS {
+  switch (method.toLowerCase()) {
+    case 'get':
+      return HTTP_METHODS.get
+
+    case 'put':
+      return HTTP_METHODS.put
+
+    case 'post':
+      return HTTP_METHODS.post
+
+    case 'patch':
+      return HTTP_METHODS.patch
+
+    case 'delete':
+      return HTTP_METHODS.delete
+
+    case 'options':
+      return HTTP_METHODS.options
+
+    case 'head':
+      return HTTP_METHODS.head
+
+    default:
+      throw new Error(`Invalid HTTP method '${method}'`)
+  }
+}
 
 /**
  * Resolves on a validated OAS 3 for the given spec (OAS 2 or OAS 3), or rejects
  * if errors occur.
  */
-export async function getValidOAS3(spec: Oas2 | Oas3): Promise<Oas3> {
-  // CASE: translate
-  if (
-    typeof (spec as Oas2).swagger === 'string' &&
-    (spec as Oas2).swagger === '2.0'
-  ) {
-    preprocessingLog(
-      `Received OpenAPI Specification 2.0 - going to translate...`
-    )
-    const result: { openapi: Oas3 } = await Swagger2OpenAPI.convertObj(spec, {})
-    return result.openapi as Oas3
+export function getValidOAS3(spec: Oas2 | Oas3): Promise<Oas3> {
+  return new Promise((resolve, reject) => {
+    // CASE: translate
+    if (
+      typeof (spec as Oas2).swagger === 'string' &&
+      (spec as Oas2).swagger === '2.0'
+    ) {
+      preprocessingLog(
+        `Received Swagger - going to translate to OpenAPI Specification...`
+      )
 
-    // CASE: validate
-  } else if (
-    typeof (spec as Oas3).openapi === 'string' &&
-    /^3/.test((spec as Oas3).openapi)
-  ) {
-    preprocessingLog(
-      `Received OpenAPI Specification 3.0.x - going to validate...`
-    )
-    const valid = OASValidator.validateSync(spec, {})
-    if (!valid) {
-      throw new Error(`Validation of OpenAPI Specification failed.`)
+      Swagger2OpenAPI.convertObj(spec, {})
+        .then(options => resolve(options.openapi))
+        .catch(error =>
+          reject(
+            `Could not convert Swagger '${
+              (spec as Oas2).info.title
+            }' to OpenAPI Specification. ${error.message}`
+          )
+        )
+
+      // CASE: validate
+    } else if (
+      typeof (spec as Oas3).openapi === 'string' &&
+      /^3/.test((spec as Oas3).openapi)
+    ) {
+      preprocessingLog(`Received OpenAPI Specification - going to validate...`)
+
+      OASValidator.validateSync(spec, {})
+        .then(() => resolve(spec as Oas3))
+        .catch(error =>
+          reject(
+            `Could not validate OpenAPI Specification '${
+              (spec as Oas3).info.title
+            }'. ${error.message}`
+          )
+        )
+    } else {
+      reject(`Invalid specification provided`)
     }
-
-    preprocessingLog(`OpenAPI Specification is validated`)
-
-    return spec as Oas3
-  } else {
-    throw new Error(`Invalid specification provided`)
-  }
+  })
 }
 
 /**
@@ -129,11 +174,19 @@ export function countOperations(oas: Oas3): number {
   let numOps = 0
   for (let path in oas.paths) {
     for (let method in oas.paths[path]) {
-      if (isOperation(method)) {
+      if (isHttpMethod(method)) {
         numOps++
+        if (oas.paths[path][method].callbacks) {
+          for (let cbName in oas.paths[path][method].callbacks) {
+            for (let cbPath in oas.paths[path][method].callbacks[cbName]) {
+              numOps++
+            }
+          }
+        }
       }
     }
   }
+
   return numOps
 }
 
@@ -144,7 +197,7 @@ export function countOperationsQuery(oas: Oas3): number {
   let numOps = 0
   for (let path in oas.paths) {
     for (let method in oas.paths[path]) {
-      if (isOperation(method) && method.toLowerCase() === 'get') {
+      if (isHttpMethod(method) && method.toLowerCase() === HTTP_METHODS.get) {
         numOps++
       }
     }
@@ -159,8 +212,31 @@ export function countOperationsMutation(oas: Oas3): number {
   let numOps = 0
   for (let path in oas.paths) {
     for (let method in oas.paths[path]) {
-      if (isOperation(method) && method.toLowerCase() !== 'get') {
+      if (isHttpMethod(method) && method.toLowerCase() !== HTTP_METHODS.get) {
         numOps++
+      }
+    }
+  }
+  return numOps
+}
+
+/**
+ * Counts the number of operations that translate to subscriptions in an OAS.
+ */
+export function countOperationsSubscription(oas: Oas3): number {
+  let numOps = 0
+  for (let path in oas.paths) {
+    for (let method in oas.paths[path]) {
+      if (
+        isHttpMethod(method) &&
+        method.toLowerCase() !== HTTP_METHODS.get &&
+        oas.paths[path][method].callbacks
+      ) {
+        for (let cbName in oas.paths[path][method].callbacks) {
+          for (let cbPath in oas.paths[path][method].callbacks[cbName]) {
+            numOps++
+          }
+        }
       }
     }
   }
@@ -175,7 +251,7 @@ export function countOperationsWithPayload(oas: Oas3): number {
   for (let path in oas.paths) {
     for (let method in oas.paths[path]) {
       if (
-        isOperation(method) &&
+        isHttpMethod(method) &&
         typeof oas.paths[path][method].requestBody === 'object'
       ) {
         numOps++
@@ -189,35 +265,7 @@ export function countOperationsWithPayload(oas: Oas3): number {
  * Resolves the given reference in the given object.
  */
 export function resolveRef(ref: string, oas: Oas3): any {
-  // Break path into individual tokens
-  const parts = ref.split('/')
-  const resolvedObject = resolveRefHelper(oas, parts)
-
-  if (resolvedObject !== null) {
-    return resolvedObject
-  } else {
-    throw new Error(`Could not resolve reference '${ref}'`)
-  }
-}
-
-/**
- * Helper for resolveRef
- *
- * @param parts The path to be resolved, but broken into tokens
- */
-function resolveRefHelper(obj: object, parts?: string[]): any {
-  if (parts.length === 0) {
-    return obj
-  }
-
-  const firstElement = parts.splice(0, 1)[0]
-  if (firstElement in obj) {
-    return resolveRefHelper(obj[firstElement], parts)
-  } else if (firstElement === '#') {
-    return resolveRefHelper(obj, parts)
-  } else {
-    return null
-  }
+  return jsonptr.JsonPointer.get(oas, ref)
 }
 
 /**
@@ -354,84 +402,13 @@ export function desanitizeObjectKeys(
 }
 
 /**
- * Replaces the path parameter in the given path with values in the given args.
- * Furthermore adds the query parameters for a request.
- */
-export function instantiatePathAndGetQuery(
-  path: string,
-  parameters: ParameterObject[],
-  args: object, // NOTE: argument keys are sanitized!
-  data: PreprocessingData
-): {
-  path: string
-  query: { [key: string]: string }
-  headers: { [key: string]: string }
-} {
-  const query = {}
-  const headers = {}
-
-  // Case: nothing to do
-  if (Array.isArray(parameters)) {
-    // Iterate parameters:
-    for (const param of parameters) {
-      const sanitizedParamName = sanitize(
-        param.name,
-        !data.options.simpleNames ? CaseStyle.camelCase : CaseStyle.simple
-      )
-
-      if (sanitizedParamName && sanitizedParamName in args) {
-        switch (param.in) {
-          // Path parameters
-          case 'path':
-            path = path.replace(`{${param.name}}`, args[sanitizedParamName])
-            break
-
-          // Query parameters
-          case 'query':
-            query[param.name] = args[sanitizedParamName]
-            break
-
-          // Header parameters
-          case 'header':
-            headers[param.name] = args[sanitizedParamName]
-            break
-
-          // Cookie parameters
-          case 'cookie':
-            if (!('cookie' in headers)) {
-              headers['cookie'] = ''
-            }
-
-            headers['cookie'] += `${param.name}=${args[sanitizedParamName]}; `
-            break
-
-          default:
-            httpLog(
-              `Warning: The parameter location '${param.in}' in the ` +
-                `parameter '${param.name}' of operation '${path}' is not ` +
-                `supported`
-            )
-        }
-      } else {
-        httpLog(
-          `Warning: The parameter '${param.name}' of operation '${path}' ` +
-            `could not be found`
-        )
-      }
-    }
-  }
-
-  return { path, query, headers }
-}
-
-/**
  * Returns the GraphQL type that the provided schema should be made into
  *
  * Does not consider allOf, anyOf, oneOf, or not (handled separately)
  */
-export function getSchemaTargetGraphQLType(
+export function getSchemaTargetGraphQLType<TSource, TContext, TArgs>(
   schema: SchemaObject,
-  data: PreprocessingData
+  data: PreprocessingData<TSource, TContext, TArgs>
 ): string | null {
   // CASE: object
   if (schema.type === 'object' || typeof schema.properties === 'object') {
@@ -572,16 +549,15 @@ export function inferResourceNameFromPath(path: string): string {
 }
 
 /**
- * Returns JSON-compatible schema required by the given endpoint - or null if it
- * does not exist.
+ * Returns JSON-compatible schema required by the given operation
  */
 export function getRequestBodyObject(
-  endpoint: OperationObject,
+  operation: OperationObject,
   oas: Oas3
 ): { payloadContentType: string; requestBodyObject: RequestBodyObject } | null {
-  if (typeof endpoint.requestBody === 'object') {
+  if (typeof operation.requestBody === 'object') {
     let requestBodyObject: RequestBodyObject | ReferenceObject =
-      endpoint.requestBody
+      operation.requestBody
 
     // Make sure we have a RequestBodyObject:
     if (typeof (requestBodyObject as ReferenceObject).$ref === 'string') {
@@ -624,18 +600,18 @@ export function getRequestBodyObject(
 }
 
 /**
- * Returns the request schema (if any) for an endpoint at given path and method,
+ * Returns the request schema (if any) for the given operation,
  * a dictionary of names from different sources (if available), and whether the
- * request schema is required for the endpoint.
+ * request schema is required for the operation.
  */
 export function getRequestSchemaAndNames(
   path: string,
-  method: string,
+  method: HTTP_METHODS,
+  operation: OperationObject,
   oas: Oas3
 ): RequestSchemaAndNames {
-  const endpoint: OperationObject = oas.paths[path][method]
   const { payloadContentType, requestBodyObject } = getRequestBodyObject(
-    endpoint,
+    operation,
     oas
   )
 
@@ -686,7 +662,7 @@ export function getRequestSchemaAndNames(
 
       if (
         'description' in payloadSchema &&
-        typeof payloadSchema['description'] === 'string'
+        typeof payloadSchema.description === 'string'
       ) {
         description += `\n\nOriginal top level description: '${payloadSchema['description']}'`
       }
@@ -710,16 +686,15 @@ export function getRequestSchemaAndNames(
 }
 
 /**
- * Returns JSON-compatible schema produced by the given endpoint - or null if it
- * does not exist.
+ * Returns JSON-compatible schema produced by the given operation
  */
 export function getResponseObject(
-  endpoint: OperationObject,
+  operation: OperationObject,
   statusCode: string,
   oas: Oas3
 ): { responseContentType: string; responseObject: ResponseObject } | null {
-  if (typeof endpoint.responses === 'object') {
-    const responses: ResponsesObject = endpoint.responses
+  if (typeof operation.responses === 'object') {
+    const responses: ResponsesObject = operation.responses
     if (typeof responses[statusCode] === 'object') {
       let responseObject: ResponseObject | ReferenceObject =
         responses[statusCode]
@@ -762,24 +737,24 @@ export function getResponseObject(
 }
 
 /**
- * Returns the response schema for endpoint at given path and method and with
- * the given status code, and a dictionary of names from different sources (if
- * available).
+ * Returns the response schema for the given operation,
+ * a successful  status code, and a dictionary of names from different sources
+ * (if available).
  */
-export function getResponseSchemaAndNames(
+export function getResponseSchemaAndNames<TSource, TContext, TArgs>(
   path: string,
-  method: string,
+  method: HTTP_METHODS,
+  operation: OperationObject,
   oas: Oas3,
-  data: PreprocessingData,
-  options: InternalOptions
+  data: PreprocessingData<TSource, TContext, TArgs>,
+  options: InternalOptions<TSource, TContext, TArgs>
 ): ResponseSchemaAndNames {
-  const endpoint: OperationObject = oas.paths[path][method]
-  const statusCode = getResponseStatusCode(path, method, oas, data)
+  const statusCode = getResponseStatusCode(path, method, operation, oas, data)
   if (!statusCode) {
     return {}
   }
   let { responseContentType, responseObject } = getResponseObject(
-    endpoint,
+    operation,
     statusCode,
     oas
   )
@@ -842,7 +817,7 @@ export function getResponseSchemaAndNames(
         responseSchema: {
           description:
             'Placeholder to support operations with no response schema',
-          type: 'string'
+          type: 'object'
         }
       }
     }
@@ -852,19 +827,17 @@ export function getResponseSchemaAndNames(
 }
 
 /**
- * Returns the success status code for the operation at the given path and
- * method (or null).
+ * Returns a success status code for the given operation
  */
-export function getResponseStatusCode(
+export function getResponseStatusCode<TSource, TContext, TArgs>(
   path: string,
   method: string,
+  operation: OperationObject,
   oas: Oas3,
-  data: PreprocessingData
+  data: PreprocessingData<TSource, TContext, TArgs>
 ): string | void {
-  const endpoint: OperationObject = oas.paths[path][method]
-
-  if (typeof endpoint.responses === 'object') {
-    const codes = Object.keys(endpoint.responses)
+  if (typeof operation.responses === 'object') {
+    const codes = Object.keys(operation.responses)
     const successCodes = codes.filter(code => {
       return SUCCESS_STATUS_RX.test(code)
     })
@@ -872,7 +845,7 @@ export function getResponseStatusCode(
       return successCodes[0]
     } else if (successCodes.length > 1) {
       handleWarning({
-        typeKey: 'MULTIPLE_RESPONSES',
+        mitigationType: MitigationTypes.MULTIPLE_RESPONSES,
         message:
           `Operation '${formatOperationString(
             method,
@@ -894,22 +867,22 @@ export function getResponseStatusCode(
 }
 
 /**
- * Returns an hash containing the links defined in the given endpoint.
+ * Returns a hash containing the links in the given operation.
  */
-export function getEndpointLinks(
+export function getLinks<TSource, TContext, TArgs>(
   path: string,
-  method: string,
+  method: HTTP_METHODS,
+  operation: OperationObject,
   oas: Oas3,
-  data: PreprocessingData
+  data: PreprocessingData<TSource, TContext, TArgs>
 ): { [key: string]: LinkObject } {
   const links = {}
-  const endpoint: OperationObject = oas.paths[path][method]
-  const statusCode = getResponseStatusCode(path, method, oas, data)
+  const statusCode = getResponseStatusCode(path, method, operation, oas, data)
   if (!statusCode) {
     return links
   }
-  if (typeof endpoint.responses === 'object') {
-    const responses: ResponsesObject = endpoint.responses
+  if (typeof operation.responses === 'object') {
+    const responses: ResponsesObject = operation.responses
     if (typeof responses[statusCode] === 'object') {
       let response: ResponseObject | ReferenceObject = responses[statusCode]
 
@@ -943,17 +916,18 @@ export function getEndpointLinks(
 }
 
 /**
- * Returns the list of parameters for the endpoint at the given method and path.
- * Resolves possible references.
+ * Returns the list of parameters in the given operation.
  */
 export function getParameters(
   path: string,
-  method: string,
+  method: HTTP_METHODS,
+  operation: OperationObject,
+  pathItem: PathItemObject,
   oas: Oas3
 ): ParameterObject[] {
   let parameters = []
 
-  if (!isOperation(method)) {
+  if (!isHttpMethod(method)) {
     translationLog(
       `Warning: attempted to get parameters for ${method} ${path}, ` +
         `which is not an operation.`
@@ -961,10 +935,8 @@ export function getParameters(
     return parameters
   }
 
-  const pathItemObject: PathItemObject = oas.paths[path]
-  const pathParams = pathItemObject.parameters
-
   // First, consider parameters in Path Item Object:
+  const pathParams = pathItem.parameters
   if (Array.isArray(pathParams)) {
     const pathItemParameters: ParameterObject[] = pathParams.map(p => {
       if (typeof (p as ReferenceObject).$ref === 'string') {
@@ -979,11 +951,9 @@ export function getParameters(
   }
 
   // Second, consider parameters in Operation Object:
-  const opObject: OperationObject = oas.paths[path][method]
-  const opObjectParameters = opObject.parameters
-
+  const opObjectParameters = operation.parameters
   if (Array.isArray(opObjectParameters)) {
-    const opParameters: ParameterObject[] = opObjectParameters.map(p => {
+    const operationParameters: ParameterObject[] = opObjectParameters.map(p => {
       if (typeof (p as ReferenceObject).$ref === 'string') {
         // Here we know we have a parameter object:
         return resolveRef(p['$ref'], oas) as ParameterObject
@@ -992,21 +962,21 @@ export function getParameters(
         return p as ParameterObject
       }
     })
-    parameters = parameters.concat(opParameters)
+    parameters = parameters.concat(operationParameters)
   }
 
   return parameters
 }
 
 /**
- * Returns an array of server objects for the opeartion at the given path and
+ * Returns an array of server objects for the operation at the given path and
  * method. Considers in the following order: global server definitions,
  * definitions at the path item, definitions at the operation, or the OAS
  * default.
  */
 export function getServers(
-  path: string,
-  method: string,
+  operation: OperationObject,
+  pathItem: PathItemObject,
   oas: Oas3
 ): ServerObject[] {
   let servers = []
@@ -1015,16 +985,14 @@ export function getServers(
     servers = oas.servers
   }
 
-  // Path item server definitions override global:
-  const pathItem = oas.paths[path]
+  // First, consider servers defined on the path
   if (Array.isArray(pathItem.servers) && pathItem.servers.length > 0) {
     servers = pathItem.servers
   }
 
-  // Operation server definitions override path item:
-  const operationObj = pathItem[method]
-  if (Array.isArray(operationObj.servers) && operationObj.servers.length > 0) {
-    servers = operationObj.servers
+  // Second, consider servers defined on the operation
+  if (Array.isArray(operation.servers) && operation.servers.length > 0) {
+    servers = operation.servers
   }
 
   // Default, in case there is no server:
@@ -1075,14 +1043,13 @@ export function getSecuritySchemes(
  * required by the operation at the given path and method.
  */
 export function getSecurityRequirements(
-  path: string,
-  method: string,
+  operation: OperationObject,
   securitySchemes: { [key: string]: ProcessedSecurityScheme },
   oas: Oas3
 ): string[] {
   const results: string[] = []
 
-  // First, consider global requirements:
+  // First, consider global requirements
   const globalSecurity: SecurityRequirementObject[] = oas.security
   if (globalSecurity && typeof globalSecurity !== 'undefined') {
     for (let secReq of globalSecurity) {
@@ -1098,8 +1065,7 @@ export function getSecurityRequirements(
     }
   }
 
-  // Local:
-  const operation: OperationObject = oas.paths[path][method]
+  // Second, consider operation requirements
   const localSecurity: SecurityRequirementObject[] = operation.security
   if (localSecurity && typeof localSecurity !== 'undefined') {
     for (let secReq of localSecurity) {
@@ -1217,8 +1183,8 @@ export function trim(str: string, length: number): string {
  * Determines if the given "method" is indeed an operation. Alternatively, the
  * method could point to other types of information (e.g., parameters, servers).
  */
-export function isOperation(method: string): boolean {
-  return OAS_OPERATIONS.includes(method.toLowerCase())
+export function isHttpMethod(method: string): boolean {
+  return Object.keys(HTTP_METHODS).includes(method.toLowerCase())
 }
 
 /**
@@ -1256,6 +1222,9 @@ export function uncapitalize(str: string): string {
 /**
  * For operations that do not have an operationId, generate one
  */
-export function generateOperationId(method: string, path: string): string {
+export function generateOperationId(
+  method: HTTP_METHODS,
+  path: string
+): string {
   return sanitize(`${method} ${path}`, CaseStyle.camelCase)
 }

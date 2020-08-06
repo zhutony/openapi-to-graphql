@@ -141,7 +141,7 @@ test('Get resource with status code: 2XX', () => {
 
 /**
  * Some operations do not have a response body. The option fillEmptyResponses
- * allows OtG to handle these cases.
+ * allows OpenAPI-to-GraphQL to handle these cases.
  */
 test('Get resource with no response schema and status code: 204 and fillEmptyResponses', () => {
   const query = `{
@@ -157,7 +157,7 @@ test('Get resource with no response schema and status code: 204 and fillEmptyRes
   })
 })
 
-// Link objects in the OAS allow OtG to create nested GraphQL objects that resolve on different API calls
+// Link objects in the OAS allow OpenAPI-to-GraphQL to create nested GraphQL objects that resolve on different API calls
 test('Get nested resource via link $response.body#/...', () => {
   const query = `{
     user (username: "arlene") {
@@ -606,8 +606,7 @@ test('Get response with cookies', () => {
   return graphql(createdSchema, query).then(result => {
     expect(result).toEqual({
       data: {
-        cookie:
-          'Thanks for your cookie preferences: "cookie_type=chocolate chip; cookie_size=mega-sized; "'
+        cookie: `You ordered a mega-sized chocolate chip cookie!`
       }
     })
   })
@@ -963,7 +962,7 @@ test('Enum values that started as numbers in OAS can be returned as strings', ()
 })
 
 test('Define header and query options', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     headers: {
       exampleHeader: 'some-value'
     },
@@ -1245,7 +1244,7 @@ test('Error contains extension', () => {
 })
 
 test('Option provideErrorExtensions should prevent error extensions from being created', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     provideErrorExtensions: false
   }
 
@@ -1284,7 +1283,7 @@ test('Option provideErrorExtensions should prevent error extensions from being c
 })
 
 test('Option customResolver', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     customResolvers: {
       'Example API': {
         '/users/{username}': {
@@ -1323,7 +1322,7 @@ test('Option customResolver', () => {
 })
 
 test('Option customResolver with links', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     customResolvers: {
       'Example API': {
         '/users/{username}': {
@@ -1379,7 +1378,7 @@ test('Option customResolver with links', () => {
 })
 
 test('Option customResolver using resolver arguments', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     customResolvers: {
       'Example API': {
         '/users/{username}': {
@@ -1418,7 +1417,7 @@ test('Option customResolver using resolver arguments', () => {
 })
 
 test('Option customResolver using resolver arguments that are sanitized', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     customResolvers: {
       'Example API': {
         '/products/{product-id}': {
@@ -1458,7 +1457,7 @@ test('Option customResolver using resolver arguments that are sanitized', () => 
 })
 
 test('Option addLimitArgument', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     addLimitArgument: true
   }
 
@@ -1684,7 +1683,7 @@ test('Handle input objects without defined properties with arbitrary GraphQL JSO
 })
 
 test('Generate "Equivalent to..." messages', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     // Used to simplify test. Otherwise viewers will polute query/mutation fields.
     viewer: false
   }
@@ -1777,7 +1776,7 @@ test('Generate "Equivalent to..." messages', () => {
 })
 
 test('Withhold "Equivalent to..." messages', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     // Used to simplify test. Otherwise viewers will polute query/mutation fields.
     viewer: false,
     equivalentToMessages: false
@@ -1890,7 +1889,7 @@ test('UUID format becomes GraphQL ID type', () => {
 })
 
 test('Option idFormats', () => {
-  const options: Options = {
+  const options: Options<any, any, any> = {
     idFormats: ['specialIdFormat']
   }
 
@@ -1984,7 +1983,7 @@ test('Option selectQueryOrMutationField', () => {
     ).toEqual(undefined)
   })
 
-  const options: Options = {
+  const options: Options<any, any, any> = {
     selectQueryOrMutationField: {
       'Example API': {
         '/users/{username}': {
@@ -2025,7 +2024,7 @@ test('Option selectQueryOrMutationField', () => {
 
 test('Header arguments are not created when they are provided through headers option', () => {
   // The GET snack operation has a snack_type and snack_size header arguments
-  const options: Options = {
+  const options: Options<any, any, any> = {
     headers: {
       snack_type: 'chips',
       snack_size: 'large'
@@ -2066,7 +2065,7 @@ test('Header arguments are not created when they are provided through headers op
 
 test('Header arguments are not created when they are provided through requestOptions option', () => {
   // The GET snack operation has a snack_type and snack_size header arguments
-  const options: Options = {
+  const options: Options<any, any, any> = {
     requestOptions: {
       headers: {
         snack_type: 'chips',
@@ -2108,9 +2107,10 @@ test('Header arguments are not created when they are provided through requestOpt
     })
 })
 
+// NOTE: This only tests how requestOptions affects schema creation, not resolver creation
 test('Query string arguments are not created when they are provided through qs option', () => {
   // The GET status operation has a limit query string parameter
-  const options: Options = {
+  const options: Options<any, any, any> = {
     qs: {
       limit: '10'
     }
@@ -2149,8 +2149,35 @@ test('Query string arguments are not created when they are provided through qs o
 })
 
 test('Query string arguments are not created when they are provided through requestOptions option', () => {
+  const query = `{
+    users(limit: 10) {
+      name
+    }
+  }`
+
+  const promise = graphql(createdSchema, query, null, {}).then(result => {
+    expect(result).toEqual({
+      data: {
+        users: [
+          {
+            name: 'Arlene L McMahon'
+          },
+          {
+            name: 'William B Ropp'
+          },
+          {
+            name: 'John C Barnes'
+          },
+          {
+            name: 'Heather J Tate'
+          }
+        ]
+      }
+    })
+  })
+
   // The GET status operation has a limit query string parameter
-  const options: Options = {
+  const options: Options<any, any, any> = {
     requestOptions: {
       qs: {
         limit: '10'
@@ -2159,17 +2186,57 @@ test('Query string arguments are not created when they are provided through requ
     }
   }
 
-  const query = `{
-    __schema {
-      queryType {
-        fields {
-          name
-          args {
-            name
+  const query2 = `{
+    users {
+      name
+    }
+  }`
+
+  const promise2 = openAPIToGraphQL
+    .createGraphQLSchema(oas, options)
+    .then(({ schema }) => {
+      const ast = parse(query2)
+      const errors = validate(schema, ast)
+      expect(errors).toEqual([])
+      return graphql(schema, query2).then(result => {
+        expect(result).toEqual({
+          data: {
+            users: [
+              {
+                name: 'Arlene L McMahon'
+              },
+              {
+                name: 'William B Ropp'
+              },
+              {
+                name: 'John C Barnes'
+              },
+              {
+                name: 'Heather J Tate'
+              }
+            ]
           }
+        })
+      })
+    })
+
+  return Promise.all([promise, promise2])
+})
+
+test('Use headers option as function', () => {
+  const options: Options<any, any, any> = {
+    headers: (method, path, title) => {
+      if (method === 'get' && path === '/snack') {
+        return {
+          snack_type: 'chips',
+          snack_size: 'small'
         }
       }
     }
+  }
+
+  const query = `{
+    snack
   }`
 
   return openAPIToGraphQL
@@ -2179,13 +2246,45 @@ test('Query string arguments are not created when they are provided through requ
       const errors = validate(schema, ast)
       expect(errors).toEqual([])
       return graphql(schema, query).then(result => {
-        expect(
-          result.data['__schema'].queryType.fields.find(field => {
-            return field.name === 'users'
-          })
-        ).toEqual({
-          name: 'users',
-          args: [] // No arguments
+        expect(result).toEqual({
+          data: {
+            snack: 'Here is a small chips'
+          }
+        })
+      })
+    })
+})
+
+test('Use requestOptions headers option as function', () => {
+  const options: Options<any, any, any> = {
+    requestOptions: {
+      headers: (method, path, title) => {
+        if (method === 'get' && path === '/snack') {
+          return {
+            snack_type: 'chips',
+            snack_size: 'small'
+          }
+        }
+      },
+      url: undefined // Mandatory for requestOptions type
+    }
+  }
+
+  const query = `{
+    snack
+  }`
+
+  return openAPIToGraphQL
+    .createGraphQLSchema(oas, options)
+    .then(({ schema }) => {
+      const ast = parse(query)
+      const errors = validate(schema, ast)
+      expect(errors).toEqual([])
+      return graphql(schema, query).then(result => {
+        expect(result).toEqual({
+          data: {
+            snack: 'Here is a small chips'
+          }
         })
       })
     })
@@ -2229,7 +2328,7 @@ test('Option genericPayloadArgName', () => {
     })
   })
 
-  const options: Options = {
+  const options: Options<any, any, any> = {
     genericPayloadArgName: true
   }
 

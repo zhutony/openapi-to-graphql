@@ -10,6 +10,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
  */
 // Type imports:
 const graphql_1 = require("graphql");
+const graphql_2 = require("./types/graphql");
 // Imports:
 const schema_builder_1 = require("./schema_builder");
 const Oas3Tools = require("./oas_3_tools");
@@ -23,8 +24,8 @@ const translationLog = debug_1.default('translation');
  * i.e. inside either rootQueryFields/rootMutationFields or inside
  * rootQueryFields/rootMutationFields for further processing
  */
-function createAndLoadViewer(queryFields, data, isMutation = false) {
-    let results = {};
+function createAndLoadViewer(queryFields, operationType, data) {
+    const results = {};
     /**
      * To ensure that viewers have unique names, we add a numerical postfix.
      *
@@ -61,7 +62,7 @@ function createAndLoadViewer(queryFields, data, isMutation = false) {
                     break;
                 default:
                     utils_1.handleWarning({
-                        typeKey: 'UNSUPPORTED_HTTP_SECURITY_SCHEME',
+                        mitigationType: utils_1.MitigationTypes.UNSUPPORTED_HTTP_SECURITY_SCHEME,
                         message: `Currently unsupported HTTP authentication protocol ` +
                             `type 'http' and scheme '${scheme}'`,
                         data,
@@ -74,9 +75,11 @@ function createAndLoadViewer(queryFields, data, isMutation = false) {
             viewerType = securityType;
         }
         // Create name for the viewer
-        let viewerName = !isMutation
+        let viewerName = operationType === graphql_2.GraphQLOperationType.Query
             ? Oas3Tools.sanitize(`viewer ${viewerType}`, Oas3Tools.CaseStyle.camelCase)
-            : Oas3Tools.sanitize(`mutation viewer ${viewerType}`, Oas3Tools.CaseStyle.camelCase);
+            : operationType === graphql_2.GraphQLOperationType.Mutation
+                ? Oas3Tools.sanitize(`mutation viewer ${viewerType}`, Oas3Tools.CaseStyle.camelCase)
+                : Oas3Tools.sanitize(`subscription viewer ${viewerType}`, Oas3Tools.CaseStyle.camelCase);
         // Ensure unique viewer name
         // If name already exists, append a number at the end of the name
         if (!(viewerType in viewerNamePostfix)) {
@@ -89,9 +92,11 @@ function createAndLoadViewer(queryFields, data, isMutation = false) {
         results[viewerName] = getViewerOT(viewerName, protocolName, securityType, queryFields[protocolName], data);
     }
     // Create name for the AnyAuth viewer
-    const anyAuthObjectName = !isMutation
+    const anyAuthObjectName = operationType === graphql_2.GraphQLOperationType.Query
         ? 'viewerAnyAuth'
-        : 'mutationViewerAnyAuth';
+        : operationType === graphql_2.GraphQLOperationType.Mutation
+            ? 'mutationViewerAnyAuth'
+            : 'subscriptionViewerAnyAuth';
     // Add the AnyAuth object type to the specified root query object type
     results[anyAuthObjectName] = getViewerAnyAuthOT(anyAuthObjectName, anyAuthFields, data);
     return results;
@@ -100,10 +105,10 @@ exports.createAndLoadViewer = createAndLoadViewer;
 /**
  * Gets the viewer Object, resolve function, and arguments
  */
-const getViewerOT = (name, protocolName, securityType, queryFields, data) => {
+function getViewerOT(name, protocolName, securityType, queryFields, data) {
     const scheme = data.security[protocolName];
     // Resolve function:
-    const resolve = (root, args, ctx) => {
+    const resolve = (root, args, context) => {
         const security = {};
         const saneProtocolName = Oas3Tools.sanitize(protocolName, Oas3Tools.CaseStyle.camelCase);
         security[Oas3Tools.storeSaneName(saneProtocolName, protocolName, data.saneMap)] = args;
@@ -152,16 +157,16 @@ const getViewerOT = (name, protocolName, securityType, queryFields, data) => {
         args,
         description
     };
-};
+}
 /**
  * Create an object containing an AnyAuth viewer, its resolve function,
  * and its args.
  */
-const getViewerAnyAuthOT = (name, queryFields, data) => {
+function getViewerAnyAuthOT(name, queryFields, data) {
     let args = {};
     for (let protocolName in data.security) {
         // Create input object types for the viewer arguments
-        const def = preprocessor_1.createDataDef({ fromRef: protocolName }, data.security[protocolName].schema, true, data);
+        const def = preprocessor_1.createDataDef({ fromRef: protocolName }, data.security[protocolName].schema, true, data, data.security[protocolName].oas);
         const type = schema_builder_1.getGraphQLType({
             def,
             data,
@@ -172,7 +177,7 @@ const getViewerAnyAuthOT = (name, queryFields, data) => {
     }
     args = utils_1.sortObject(args);
     // Pass object containing security information to fields
-    const resolve = (root, args, ctx) => {
+    const resolve = (root, args, context) => {
         return {
             _openAPIToGraphQL: {
                 security: args
@@ -190,5 +195,5 @@ const getViewerAnyAuthOT = (name, queryFields, data) => {
         description: `A viewer that wraps operations for all available ` +
             `authentication mechanisms`
     };
-};
+}
 //# sourceMappingURL=auth_builder.js.map

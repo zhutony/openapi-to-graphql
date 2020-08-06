@@ -13,13 +13,14 @@ import {
   GraphQLInputObjectType,
   GraphQLList,
   GraphQLEnumType,
-  GraphQLUnionType
+  GraphQLUnionType,
+  GraphQLFieldResolver
 } from 'graphql'
 
 export enum GraphQLOperationType {
   Query,
-  Mutation
-  // TODO: Subscription
+  Mutation,
+  Subscription
 }
 
 export type GraphQLType =
@@ -39,16 +40,22 @@ export type Args = {
   [key: string]: Arg
 }
 
-export type ResolveFunction = (
+export type SubscriptionContext = {
+  pubsub: any
+  [key: string]: any
+}
+
+export type SubscriptionIterator = (
   root: object,
   args: object,
-  ctx: object,
-  info: object
-) => Promise<any> | any
+  context: SubscriptionContext,
+  info?: object
+) => AsyncIterable<string | string[]>
 
-export type Field = {
+export type Field<TSource, TContext, TArgs> = {
   type: GraphQLType
-  resolve?: ResolveFunction
+  resolve?: GraphQLFieldResolver<TSource, TContext, TArgs>
+  subscribe?: GraphQLFieldResolver<TSource, SubscriptionContext, TArgs>
   args?: Args
   description: string
 }

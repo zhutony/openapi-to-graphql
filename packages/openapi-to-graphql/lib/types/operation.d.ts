@@ -3,7 +3,9 @@
  * operation in the OAS.
  */
 import { Oas3, LinkObject, ParameterObject, ServerObject, SchemaObject } from './oas3';
+import { GraphQLOperationType } from './graphql';
 import { GraphQLScalarType, GraphQLObjectType, GraphQLInputObjectType, GraphQLList, GraphQLEnumType, GraphQLUnionType } from 'graphql';
+import { HTTP_METHODS } from '../oas_3_tools';
 import * as GraphQLJSON from 'graphql-type-json';
 export declare type DataDefinition = {
     preferredName: string;
@@ -64,7 +66,7 @@ export declare type Operation = {
     /**
      * HTTP method for this operation
      */
-    method: string;
+    method: HTTP_METHODS;
     /**
      * Content-type of the request payload
      */
@@ -101,14 +103,15 @@ export declare type Operation = {
      */
     servers: ServerObject[];
     /**
-     * Whether this operation should be placed in an authentication viewer\
+     * Whether this operation should be placed in an authentication viewer
      * (cannot be true if "viewer" option passed to OpenAPI-to-GraphQL is false).
      */
     inViewer: boolean;
     /**
-     * Whether this operation is a mutation (or a query).
+     * Type of root operation type, i.e. whether the generated field should be
+     * added to the Query, Mutation, or Subscription root operation
      */
-    isMutation: boolean;
+    operationType: GraphQLOperationType;
     /**
      * The success HTTP code, 200-299, destined to become a GraphQL object type
      */
